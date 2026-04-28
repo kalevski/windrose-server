@@ -11,7 +11,8 @@ readonly SERVER_FILES="/home/steam/server-files"
 readonly SERVER_DESC="${SERVER_FILES}/R5/ServerDescription.json"
 readonly SERVER_EXEC="${SERVER_FILES}/R5/Binaries/Win64/WindroseServer-Win64-Shipping.exe"
 readonly LOG_FILE="${SERVER_FILES}/R5/Saved/Logs/R5.log"
-readonly FIRST_BOOT_TIMEOUT="${FIRST_BOOT_TIMEOUT:-120}"
+readonly WINE_BOOT_LOG="${SERVER_FILES}/wine-firstboot.log"
+readonly FIRST_BOOT_TIMEOUT="${FIRST_BOOT_TIMEOUT:-180}"
 
 cd "$SERVER_FILES"
 
@@ -28,15 +29,29 @@ export WINEARCH="${WINEARCH:-win64}"
 export WINEDEBUG="${WINEDEBUG:--all}"
 export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree,mshtml=}"
 
+dump_wine_boot_log() {
+    if [[ -s "$WINE_BOOT_LOG" ]]; then
+        log_error "---- last 40 lines of wine first-boot output ($WINE_BOOT_LOG) ----"
+        tail -n 40 "$WINE_BOOT_LOG" >&2 || true
+        log_error "---- end of wine output ----"
+    else
+        log_error "No wine output captured — wine produced nothing on stdout/stderr."
+    fi
+}
+
 generate_default_config() {
     log_step "First boot detected — generating default ServerDescription.json"
-    xvfb-run --auto-servernum wine "$SERVER_EXEC" -log >/dev/null 2>&1 &
+    : > "$WINE_BOOT_LOG"
+    # Use a fuller WINEDEBUG so we get a real error if wine crashes early.
+    WINEDEBUG="${WINE_FIRSTBOOT_DEBUG:-err+all,fixme-all}" \
+        xvfb-run --auto-servernum wine "$SERVER_EXEC" -log >>"$WINE_BOOT_LOG" 2>&1 &
     local pid=$!
 
     local elapsed=0
     while [[ ! -f "$SERVER_DESC" ]] && (( elapsed < FIRST_BOOT_TIMEOUT )); do
         if ! kill -0 "$pid" 2>/dev/null; then
             log_error "Wine process exited before ServerDescription.json was written"
+            dump_wine_boot_log
             return 1
         fi
         sleep 1
@@ -48,6 +63,7 @@ generate_default_config() {
         kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
         wineserver -k 2>/dev/null || true
+        dump_wine_boot_log
         return 1
     fi
 
